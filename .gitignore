@@ -16,7 +16,7 @@ frontend/dist/
 # IDE
 .vscode/
 .idea/
-.kiro/
+#.kiro/
 
 # OS
 .DS_Store
