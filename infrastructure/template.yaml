@@ -1,0 +1,352 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Recovery Loop — Stateful AI unblocking tool infrastructure
+
+Parameters:
+  RecoverySessionsTableName:
+    Type: String
+    Default: RecoverySessions
+    Description: DynamoDB table name for session state
+
+  BedrockModelId:
+    Type: String
+    Default: amazon.nova-lite-v1:0
+    Description: Amazon Bedrock model identifier
+
+  E2BSecretName:
+    Type: String
+    Default: recovery-loop/e2b-api-key
+    Description: Secrets Manager secret name for E2B API key
+
+  MaxConcurrency:
+    Type: Number
+    Default: 10
+    Description: Lambda reserved concurrent executions
+
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    Description: CloudWatch Log Group retention in days
+
+  SandboxTimeoutMs:
+    Type: Number
+    Default: 30000
+    Description: E2B sandbox execution timeout in milliseconds
+
+  BedrockTimeoutMs:
+    Type: Number
+    Default: 25000
+    Description: Bedrock invocation timeout in milliseconds
+
+  MaxRetries:
+    Type: Number
+    Default: 2
+    Description: Maximum agentic retry attempts
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 60
+    MemorySize: 256
+    Environment:
+      Variables:
+        RECOVERY_SESSIONS_TABLE: !Ref RecoverySessionsTableName
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        E2B_SECRET_NAME: !Ref E2BSecretName
+        MAX_RETRIES: !Ref MaxRetries
+        SANDBOX_TIMEOUT_MS: !Ref SandboxTimeoutMs
+        BEDROCK_TIMEOUT_MS: !Ref BedrockTimeoutMs
+        LOG_LEVEL: INFO
+
+Resources:
+  # ─── DynamoDB ─────────────────────────────────────────────────────────────────
+  RecoverySessionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref RecoverySessionsTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ─── Lambda Function ──────────────────────────────────────────────────────────
+  UnblockAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: UnblockAgent
+      Handler: handler.handler
+      CodeUri: ../backend-lambda/
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+        Cors:
+          AllowOrigins:
+            - "*"
+          AllowMethods:
+            - '*'
+          AllowHeaders:
+            - Content-Type
+          MaxAge: 3600
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: DynamoDBReadWrite
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !GetAtt RecoverySessionsTable.Arn
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: BedrockInvoke
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: SecretsManagerRead
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref E2BApiKeySecret
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: CloudWatchLogs
+              Effect: Allow
+              Action:
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/UnblockAgent:*"
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: es2022
+        EntryPoints:
+          - src/handler.ts
+        External:
+          - "@aws-sdk/*"
+
+  # ─── Secrets Manager ──────────────────────────────────────────────────────────
+  E2BApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Ref E2BSecretName
+      Description: E2B API key for Recovery Loop sandbox execution
+      SecretString: '{"E2B_API_KEY":"PLACEHOLDER_REPLACE_AFTER_DEPLOY"}'
+
+  # ─── S3 Buckets ──────────────────────────────────────────────────────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+
+  # ─── CloudFront ───────────────────────────────────────────────────────────────
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: RecoveryLoopOAC
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: RecoveryLoopSecurityHeaders
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "default-src 'self'; connect-src 'self' https://*.lambda-url.us-east-1.on.aws; script-src 'self'; style-src 'self' 'unsafe-inline'"
+            Override: true
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubDomains: true
+            Preload: true
+            Override: true
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+          Compress: true
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  # ─── CloudWatch ───────────────────────────────────────────────────────────────
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/UnblockAgent
+      RetentionInDays: !Ref LogRetentionDays
+
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: RecoveryLoopAlerts
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: UnblockAgent-Errors
+      AlarmDescription: Fires when Lambda error count exceeds threshold
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: UnblockAgent
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertsTopic
+
+  LambdaThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: UnblockAgent-Throttles
+      AlarmDescription: Fires when Lambda throttle count exceeds threshold
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: UnblockAgent
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertsTopic
+
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: UnblockAgent-Duration-P99
+      AlarmDescription: Fires when Lambda P99 duration exceeds 45 seconds
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: UnblockAgent
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 45000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertsTopic
+
+Outputs:
+  FunctionUrl:
+    Description: Lambda Function URL for SSE streaming
+    Value: !GetAtt UnblockAgentFunctionUrl.FunctionUrl
+    Export:
+      Name: !Sub "${AWS::StackName}-FunctionUrl"
+
+  FrontendBucketName:
+    Description: S3 bucket for frontend assets
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-FrontendBucket"
+
+  CloudFrontDomain:
+    Description: CloudFront distribution domain
+    Value: !GetAtt FrontendDistribution.DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-CloudFrontDomain"
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID for invalidations
+    Value: !Ref FrontendDistribution
+
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref RecoverySessionsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-TableName"
+
+  SecretArn:
+    Description: E2B API key secret ARN
+    Value: !Ref E2BApiKeySecret
+    Export:
+      Name: !Sub "${AWS::StackName}-SecretArn"
+
+  SecretName:
+    Description: E2B API key secret name
+    Value: !Ref E2BSecretName

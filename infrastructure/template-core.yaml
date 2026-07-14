@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Recovery Loop — Core infrastructure (no CloudFront)
+
+Parameters:
+  RecoverySessionsTableName:
+    Type: String
+    Default: RecoverySessions
+  BedrockModelId:
+    Type: String
+    Default: us.amazon.nova-2-lite-v1:0
+  E2BSecretName:
+    Type: String
+    Default: recovery-loop/e2b-api-key
+  MicrovmImageArn:
+    Type: String
+    Default: ''
+    Description: ARN of the Lambda MicroVM image for sandbox execution
+  MaxConcurrency:
+    Type: Number
+    Default: 10
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 60
+    MemorySize: 256
+    Environment:
+      Variables:
+        RECOVERY_SESSIONS_TABLE: !Ref RecoverySessionsTableName
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        MICROVM_IMAGE_ARN: !Ref MicrovmImageArn
+        MAX_RETRIES: '2'
+        SANDBOX_TIMEOUT_MS: '30000'
+        BEDROCK_TIMEOUT_MS: '25000'
+        LOG_LEVEL: INFO
+
+Resources:
+  RecoverySessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref RecoverySessionsTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  UnblockAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: UnblockAgent
+      Handler: handler.handler
+      CodeUri: ../backend-lambda/
+      
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+        Cors:
+          AllowOrigins:
+            - '*'
+          AllowMethods:
+            - '*'
+          AllowHeaders:
+            - Content-Type
+          MaxAge: 3600
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecoverySessionsTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+                - !Sub 'arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0'
+                - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}'
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref E2BApiKeySecret
+            - Effect: Allow
+              Action:
+                - lambda-microvms:RunMicrovm
+                - lambda-microvms:CreateMicrovmAuthToken
+                - lambda-microvms:TerminateMicrovm
+                - lambda-microvms:GetMicrovm
+              Resource: '*'
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: es2022
+        EntryPoints:
+          - src/handler.ts
+        External:
+          - '@aws-sdk/client-dynamodb'
+          - '@aws-sdk/lib-dynamodb'
+          - '@aws-sdk/client-bedrock-runtime'
+          - '@aws-sdk/client-secrets-manager'
+
+  E2BApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Ref E2BSecretName
+      Description: E2B API key for Recovery Loop
+      SecretString: '{"E2B_API_KEY":"PLACEHOLDER_REPLACE_AFTER_DEPLOY"}'
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/UnblockAgent
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ─── S3 Frontend Bucket ─────────────────────────────────────────────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+
+  # ─── CloudFront ─────────────────────────────────────────────────────────────
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: RecoveryLoopOAC
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+          Compress: true
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+Outputs:
+  FunctionUrl:
+    Description: Lambda Function URL for SSE streaming
+    Value: !GetAtt UnblockAgentFunctionUrl.FunctionUrl
+  TableName:
+    Value: !Ref RecoverySessionsTable
+  SecretArn:
+    Value: !Ref E2BApiKeySecret
+  FrontendBucketName:
+    Description: S3 bucket for frontend assets
+    Value: !Ref FrontendBucket
+  CloudFrontDomain:
+    Description: CloudFront distribution domain
+    Value: !GetAtt FrontendDistribution.DomainName
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID for invalidations
+    Value: !Ref FrontendDistribution
+

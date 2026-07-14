@@ -1,0 +1,43 @@
+/* Recovery Loop — Material Design 3 Color Palette */
+:root {
+  /* Primary */
+  --md-primary: #7C580D;
+  --md-on-primary: #FFFFFF;
+  --md-primary-container: #FFDEAB;
+  --md-on-primary-container: #5F4100;
+
+  /* Secondary */
+  --md-secondary: #6D5C3F;
+  --md-on-secondary: #FFFFFF;
+  --md-secondary-container: #F8DFBB;
+  --md-on-secondary-container: #54442A;
+
+  /* Tertiary */
+  --md-tertiary: #4E6543;
+  --md-on-tertiary: #FFFFFF;
+  --md-tertiary-container: #D0EBC0;
+  --md-on-tertiary-container: #374D2D;
+
+  /* Error */
+  --md-error: #BA1A1A;
+  --md-on-error: #FFFFFF;
+  --md-error-container: #FFDAD6;
+  --md-on-error-container: #93000A;
+
+  /* Background & Surface */
+  --md-background: #FFF8F3;
+  --md-on-background: #201B13;
+  --md-surface: #FFF8F3;
+  --md-on-surface: #201B13;
+  --md-surface-variant: #EEE0CF;
+  --md-on-surface-variant: #4E4539;
+
+  /* Outline */
+  --md-outline: #807667;
+  --md-outline-variant: #D2C5B4;
+
+  /* Surface Containers */
+  --md-surface-container: #F8ECDF;
+  --md-surface-container-high: #F2E6D9;
+  --md-surface-container-highest: #ECE1D4;
+}
