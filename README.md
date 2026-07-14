@@ -133,6 +133,29 @@ data: {"type":"final","payload":"success","metadata":{"sessionId":"...","retryCo
 |---|---|
 | `VITE_API_URL` | Lambda Function URL |
 
+## Kiro Hooks
+
+This project uses [Kiro IDE hooks](https://kiro.dev) to automate developer workflows.
+
+### Breaking Change Sentinel
+
+**Trigger:** Any edit to source files in `backend-lambda/src/`, `backend-lambda/tests/`, `frontend/src/`, `infrastructure/`, or `microvm-image/server.py`
+
+**What it does:** Automatically analyzes the git diff when you save a file and produces a markdown report covering:
+
+- Public function signature changes (params added/removed/reordered, return type changes)
+- Renamed, removed, or newly required props (component prop changes that break callers)
+- API route changes (path, method, request/response shape)
+- Exported symbol changes (renamed/removed exports, changed types)
+- Changed return shapes (different keys, nullable changes)
+- Behavior changes (logic changes affecting tests, docs, or usage)
+
+**Output:** A concise risk report with sections for Change Detected, Possible Impact, Suggested Follow-up, and Risk Level.
+
+**Files:**
+- `.kiro/hooks/breaking-change-sentinel.kiro.hook` — hook configuration
+- `.kiro/hooks/breaking-change-sentinel-prompt.md` — detailed prompt instructions
+
 ## Assumptions and Notes
 
 - API is public (no auth) for MVP — add API key auth before sharing externally
