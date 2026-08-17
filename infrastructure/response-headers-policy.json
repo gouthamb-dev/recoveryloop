@@ -1,0 +1,23 @@
+{
+  "Name": "RecoveryLoopSecurityHeaders",
+  "Comment": "Custom security headers allowing iframe from goutham.dev subdomains",
+  "SecurityHeadersConfig": {
+    "ContentSecurityPolicy": {
+      "ContentSecurityPolicy": "default-src 'self'; connect-src 'self' https://*.lambda-url.us-east-1.on.aws; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'self' https://*.goutham.dev https://goutham.dev",
+      "Override": true
+    },
+    "StrictTransportSecurity": {
+      "AccessControlMaxAgeSec": 31536000,
+      "IncludeSubdomains": true,
+      "Preload": true,
+      "Override": true
+    },
+    "ContentTypeOptions": {
+      "Override": true
+    },
+    "ReferrerPolicy": {
+      "ReferrerPolicy": "strict-origin-when-cross-origin",
+      "Override": true
+    }
+  }
+}
